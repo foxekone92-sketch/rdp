@@ -1,0 +1,69 @@
+name: RDP - Tailscale Fix
+on:
+  workflow_dispatch:
+
+jobs:
+  secure-rdp:
+    runs-on: windows-latest
+    timeout-minutes: 360 # الحد الأقصى لـ GitHub هو 6 ساعات
+
+    steps:
+      - name: Configure Core RDP Settings
+        run: |
+          # تفعيل RDP وإعدادات الحماية
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
+          netsh advfirewall firewall set rule group="remote desktop" new enable=Yes
+          
+          # إعادة تشغيل الخدمة للتأكد من التفعيل
+          Restart-Service -Name TermService -Force -ErrorAction SilentlyContinue
+
+      - name: Create RDP User
+        run: |
+          # إنشاء كلمة مرور قوية عشوائية
+          $password = -join ((65..90) + (97..122) + (48..57) | Get-Random -Count 16 | % {[char]$_})
+          $securePass = ConvertTo-SecureString $password -AsPlainText -Force
+          
+          # إنشاء المستخدم وإضافته للمسؤولين
+          New-LocalUser -Name "RDP_User" -Password $securePass -AccountNeverExpires
+          Add-LocalGroupMember -Group "Administrators" -Member "RDP_User"
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "RDP_User"
+          
+          # حفظ البيانات لعرضها في النهاية
+          echo "RDP_PASS=$password" >> $env:GITHUB_ENV
+
+      - name: Install Tailscale
+        run: |
+          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
+          $installerPath = "$env:TEMP\tailscale.msi"
+          Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
+          
+          # الإصلاح الفني لعملية التثبيت (تجنب خطأ علامات التنصيص)
+          Start-Process msiexec.exe -ArgumentList '/i', "$installerPath", '/quiet', '/norestart' -Wait
+
+      - name: Establish Tailscale Connection
+        run: |
+          # الربط التلقائي باستخدام المفتاح (يجب وضعه في الـ Secrets)
+          # استبدل TAILSCALE_AUTH_KEY في إعدادات المستودع
+          & "C:\Program Files\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-runner-${{ github.run_id }}
+          
+          # الحصول على الأي بي الخاص بـ Tailscale
+          $tsIP = & "C:\Program Files\Tailscale\tailscale.exe" ip -4
+          echo "TS_IP=$tsIP" >> $env:GITHUB_ENV
+
+      - name: Display Connection Details
+        run: |
+          Write-Host "=========================================="
+          Write-Host "  ✅ RDP IS READY!"
+          Write-Host "  🌐 IP Address: $env:TS_IP"
+          Write-Host "  👤 Username: RDP_User"
+          Write-Host "  🔑 Password: $env:RDP_PASS"
+          Write-Host "=========================================="
+
+      - name: Keep Active
+        run: |
+          # إبقاء الـ Runner يعمل حتى نهاية الوقت المسموح
+          while ($true) {
+              Write-Host "Connection still active... $(Get-Date)"
+              Start-Sleep -Seconds 300
+          }
